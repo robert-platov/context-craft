@@ -45,10 +45,34 @@
         {
           "id": "contextCraftFileBrowser",
           "name": "Context Craft"
+        },
+        {
+          "id": "contextCraftSettings",
+          "name": "Settings"
         }
       ]
     },
+    "configuration": {
+      "title": "Context Craft",
+      "properties": {
+        "contextCraft.fileMapMode": {
+          "type": "string",
+          "enum": ["disabled", "selected", "all"],
+          "default": "selected",
+          "enumDescriptions": [
+            "No file map in output",
+            "Show only selected files in tree",
+            "Show full project tree (respects .gitignore)"
+          ],
+          "description": "File map mode for copied context"
+        }
+      }
+    },
     "commands": [
+      {
+        "command": "contextCraft.selectFileMapMode",
+        "title": "Select File Map Mode"
+      },
       {
         "command": "contextCraft.selectGitChanges",
         "title": "Select Git Changes",

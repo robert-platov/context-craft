@@ -1,14 +1,18 @@
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
-import { MAX_PREVIEW_BYTES } from "../constants";
+import { MAX_PREVIEW_BYTES, MAX_COLLECTED_FILES } from "../constants";
 import { FileTreeProvider } from "../FileTreeProvider";
-import { countTokens } from "../tokenCounter";
-import { isBinary } from "../utils";
+import { generateFileMap, generateFileMapMultiRoot } from "../fileMapGenerator";
+import { getIgnoreParser } from "../getIgnoreParser";
+import { SettingsTreeProvider } from "../SettingsTreeProvider";
+import { countTokens, countTokensFromText } from "../tokenCounter";
+import { isBinary, collectFiles } from "../utils";
 
 export function registerCopySelectedCommand(
   context: vscode.ExtensionContext,
   fileTreeProvider: FileTreeProvider,
+  settingsProvider: SettingsTreeProvider,
   resolveSelectedFiles: (
     fileTree: FileTreeProvider,
     root?: vscode.Uri
@@ -33,6 +37,8 @@ export function registerCopySelectedCommand(
       }
 
       const isMultiRoot = workspaceFolders.length > 1;
+      const includeFileMap = settingsProvider.isFileMapEnabled();
+      const fileMapIncludeAllFiles = settingsProvider.isFileMapAllFilesEnabled();
 
       // Group files by workspace folder if multi-root
       const filesByWorkspace = new Map<string, string[]>();
@@ -44,6 +50,55 @@ export function registerCopySelectedCommand(
           filesByWorkspace.set(workspaceKey, []);
         }
         filesByWorkspace.get(workspaceKey)!.push(abs);
+      }
+
+      // Generate file map if enabled
+      let fileMapSection = "";
+      if (includeFileMap) {
+        // Determine which files to show in the map
+        let fileMapFiles: string[];
+        let selectedFilesForMarking: string[] | undefined;
+
+        if (fileMapIncludeAllFiles) {
+          // Collect all files from workspace(s), respecting .gitignore
+          const allFilesPromises = workspaceFolders.map(async (ws) => {
+            const ignoreParser = await getIgnoreParser(ws.uri);
+            const capCounter = { count: 0 };
+            return collectFiles(ws.uri, ignoreParser, ws.uri, undefined, MAX_COLLECTED_FILES, capCounter);
+          });
+          const allFilesArrays = await Promise.all(allFilesPromises);
+          fileMapFiles = allFilesArrays.flat().sort();
+          // Mark only the selected files with *
+          selectedFilesForMarking = absoluteFiles;
+        } else {
+          fileMapFiles = absoluteFiles;
+          // All files are selected, so mark all
+          selectedFilesForMarking = undefined;
+        }
+
+        if (isMultiRoot) {
+          const multiRootMap = new Map<string, { workspaceName: string; workspacePath: string; files: string[] }>();
+          // Group file map files by workspace
+          const fileMapByWorkspace = new Map<string, string[]>();
+          for (const file of fileMapFiles) {
+            const fileUri = vscode.Uri.file(file);
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+            const workspaceKey = workspaceFolder?.uri.fsPath ?? workspaceFolders[0].uri.fsPath;
+            if (!fileMapByWorkspace.has(workspaceKey)) {
+              fileMapByWorkspace.set(workspaceKey, []);
+            }
+            fileMapByWorkspace.get(workspaceKey)!.push(file);
+          }
+          for (const [workspaceKey, files] of fileMapByWorkspace) {
+            const workspaceFolder = workspaceFolders.find(ws => ws.uri.fsPath === workspaceKey);
+            const workspaceName = workspaceFolder?.name ?? path.basename(workspaceKey);
+            multiRootMap.set(workspaceKey, { workspaceName, workspacePath: workspaceKey, files });
+          }
+          fileMapSection = generateFileMapMultiRoot(multiRootMap, selectedFilesForMarking);
+        } else {
+          const workspaceRoot = workspaceFolders[0].uri.fsPath;
+          fileMapSection = generateFileMap(fileMapFiles, workspaceRoot, selectedFilesForMarking);
+        }
       }
 
       let xmlChunks: string[] = ["<code_files>"];
@@ -108,14 +163,27 @@ export function registerCopySelectedCommand(
       }
 
       xmlChunks.push("</code_files>");
-      const xmlPayload = xmlChunks.join(os.EOL);
-      const tokenCount = await countTokens(absoluteFiles);
-      await vscode.env.clipboard.writeText(xmlPayload);
+      const codeFilesPayload = xmlChunks.join(os.EOL);
+
+      // Build final payload with optional file map
+      let finalPayload: string;
+      if (fileMapSection) {
+        finalPayload = fileMapSection + os.EOL + os.EOL + codeFilesPayload;
+      } else {
+        finalPayload = codeFilesPayload;
+      }
+
+      // Count tokens including file map
+      const fileTokenCount = await countTokens(absoluteFiles);
+      const fileMapTokenCount = fileMapSection ? countTokensFromText(fileMapSection) : 0;
+      const totalTokenCount = fileTokenCount + fileMapTokenCount;
+
+      await vscode.env.clipboard.writeText(finalPayload);
       vscode.window.showInformationMessage(
         `Copied ${absoluteFiles.length} file${
           absoluteFiles.length === 1 ? "" : "s"
         } ` +
-          `(${tokenCount} tokens) as XML. Paste anywhere to share or prompt an LLM.`
+          `(${totalTokenCount.toLocaleString()} tokens) as XML. Paste anywhere to share or prompt an LLM.`
       );
     })
   );

@@ -1,4 +1,5 @@
 import ignore from "ignore";
+import * as path from "path";
 import * as vscode from "vscode";
 import { registerCopySelectedCommand } from "./commands/copySelected";
 import { registerRefreshCommand } from "./commands/refresh";
@@ -14,20 +15,23 @@ import { registerRenameFileCommand } from "./commands/renameFile";
 import { registerDeleteFileCommand } from "./commands/deleteFile";
 import { STATE_KEY_SELECTED, MAX_COLLECTED_FILES } from "./constants";
 import { debounce } from "./debounce";
+import { generateFileMap, generateFileMapMultiRoot } from "./fileMapGenerator";
 import { FileTreeProvider } from "./FileTreeProvider";
 import { getIgnoreParser } from "./getIgnoreParser";
 import { toggleSelection } from "./selectionLogic";
-import { countTokens } from "./tokenCounter";
+import { SettingsTreeProvider } from "./SettingsTreeProvider";
+import { countTokens, countTokensFromText } from "./tokenCounter";
 import { collectFiles } from "./utils";
 		
 export let ignoreParserCache: Map<string, { parser: ReturnType<typeof ignore>, mtime: number }> = new Map();
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
 	let fileTreeProvider: FileTreeProvider;
+	let settingsProvider: SettingsTreeProvider;
 	let treeView: vscode.TreeView<vscode.Uri>;
 	let tokenStatusBar: vscode.StatusBarItem;
-    let currentAbort: AbortController | undefined;
-    let refreshSeq = 0;
+	let currentAbort: AbortController | undefined;
+	let refreshSeq = 0;
     
 
 	async function resolveSelectedFiles(
@@ -90,24 +94,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return Array.from(new Set(files));
 	}
 
-    const updateUi = (filesCount: number, tokensCount: number) => {
-		const fileText = `${filesCount} file${filesCount === 1 ? "" : "s"}`;
-		const tokenText = `${tokensCount.toLocaleString()} tokens`;
-		if (tokenStatusBar) {
-			tokenStatusBar.text = `$(symbol-string) ${fileText} | ${tokenText}`;
+	interface StatusOptions {
+		fileMapEnabled?: boolean;
+		filesCount?: number;
+		tokensText?: string;
+		isCalculating?: boolean;
+	}
+
+	const buildStatusText = (options: StatusOptions): string => {
+		const parts: string[] = [];
+
+		if (options.fileMapEnabled) {
+			parts.push("file map");
 		}
-		if (treeView) {
-			treeView.message = `${fileText} | ${tokenText}`;
+
+		if (options.filesCount !== undefined) {
+			parts.push(`${options.filesCount} file${options.filesCount === 1 ? "" : "s"}`);
 		}
+
+		if (options.tokensText) {
+			parts.push(options.tokensText);
+		}
+
+		return parts.join(" | ");
 	};
 
-	const setCalculatingUi = (hint?: string) => {
-		const text = hint ? `Calculating… ${hint}` : "Calculating…";
+	const updateStatusBar = (options: StatusOptions) => {
+		const displayText = buildStatusText(options);
+		const icon = options.isCalculating ? "$(sync~spin)" : "$(symbol-string)";
 		if (tokenStatusBar) {
-			tokenStatusBar.text = `$(sync~spin) ${text}`;
+			tokenStatusBar.text = `${icon} ${displayText}`;
 		}
 		if (treeView) {
-			treeView.message = text;
+			treeView.message = displayText;
 		}
 	};
 
@@ -117,32 +136,115 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		try { currentAbort?.abort(); } catch {}
 		currentAbort = new AbortController();
 		fileTreeProvider.refresh();
-		const hasWorkspace = (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		const hasWorkspace = (workspaceFolders?.length ?? 0) > 0;
 		if (!hasWorkspace) {
-			if (tokenStatusBar) {
-				tokenStatusBar.text = `$(symbol-string) No workspace`;
-			}
-			if (treeView) {
-				treeView.message = `No workspace folder`;
-			}
+			updateStatusBar({ tokensText: "No workspace" });
 			return;
 		}
 
+		// Get file map settings early for status display
+		const fileMapEnabled = settingsProvider?.isFileMapEnabled() ?? false;
+		const includeAllFiles = settingsProvider?.isFileMapAllFilesEnabled() ?? false;
+
 		const checkedCount = fileTreeProvider.checkedPaths.size;
 		console.log(`[ContextCraft] refresh start seq=${mySeq} checked=${checkedCount}`);
-		setCalculatingUi(checkedCount > 0 ? `${checkedCount} selected` : undefined);
+
+		// Initial calculating state (don't know file count yet)
+		updateStatusBar({
+			fileMapEnabled,
+			tokensText: "Calculating…",
+			isCalculating: true
+		});
+
 		const t0 = Date.now();
 		const resolvedFiles = await resolveSelectedFiles(fileTreeProvider, undefined, currentAbort.signal);
 		if (mySeq !== refreshSeq) { return; }
 		const t1 = Date.now();
 		console.log(`[ContextCraft] resolveSelectedFiles seq=${mySeq} files=${resolvedFiles.length} in ${t1 - t0}ms`);
 		const filesCount = resolvedFiles.length;
+
+		// Update with file count, still calculating tokens
+		updateStatusBar({
+			fileMapEnabled,
+			filesCount,
+			tokensText: "Calculating…",
+			isCalculating: true
+		});
+
 		const t2 = Date.now();
-		const tokens = await countTokens(resolvedFiles, currentAbort.signal);
+		const fileTokens = await countTokens(resolvedFiles, currentAbort.signal);
 		if (mySeq !== refreshSeq) { return; }
 		const t3 = Date.now();
-		console.log(`[ContextCraft] countTokens seq=${mySeq} totalTokens=${tokens} in ${t3 - t2}ms (total ${t3 - t0}ms)`);
-		updateUi(filesCount, tokens);
+		console.log(`[ContextCraft] countTokens seq=${mySeq} fileTokens=${fileTokens} in ${t3 - t2}ms`);
+
+		// Calculate file map tokens if enabled
+		let fileMapTokens = 0;
+
+		// Calculate file map tokens when:
+		// - File map is enabled AND there are selected files, OR
+		// - File map mode is "all" (show full project tree even with no selections)
+		if (fileMapEnabled && (resolvedFiles.length > 0 || includeAllFiles)) {
+			const isMultiRoot = workspaceFolders!.length > 1;
+
+			let fileMapFiles: string[];
+			let selectedFilesForMarking: string[] | undefined;
+
+			if (includeAllFiles) {
+				// Collect all files from workspace(s), respecting .gitignore
+				const allFilesPromises = workspaceFolders!.map(async (ws) => {
+					const ignoreParser = await getIgnoreParser(ws.uri);
+					const capCounter = { count: 0 };
+					return collectFiles(ws.uri, ignoreParser, ws.uri, currentAbort?.signal, MAX_COLLECTED_FILES, capCounter);
+				});
+				const allFilesArrays = await Promise.all(allFilesPromises);
+				if (mySeq !== refreshSeq) { return; }
+				fileMapFiles = allFilesArrays.flat().sort();
+				selectedFilesForMarking = resolvedFiles;
+			} else {
+				fileMapFiles = resolvedFiles;
+				selectedFilesForMarking = undefined;
+			}
+
+			if (fileMapFiles.length > 0) {
+				let fileMapSection = "";
+				if (isMultiRoot) {
+					const multiRootMap = new Map<string, { workspaceName: string; workspacePath: string; files: string[] }>();
+					const fileMapByWorkspace = new Map<string, string[]>();
+					for (const file of fileMapFiles) {
+						const fileUri = vscode.Uri.file(file);
+						const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+						const workspaceKey = workspaceFolder?.uri.fsPath ?? workspaceFolders![0].uri.fsPath;
+						if (!fileMapByWorkspace.has(workspaceKey)) {
+							fileMapByWorkspace.set(workspaceKey, []);
+						}
+						fileMapByWorkspace.get(workspaceKey)!.push(file);
+					}
+					for (const [workspaceKey, files] of fileMapByWorkspace) {
+						const workspaceFolder = workspaceFolders!.find(ws => ws.uri.fsPath === workspaceKey);
+						const workspaceName = workspaceFolder?.name ?? path.basename(workspaceKey);
+						multiRootMap.set(workspaceKey, { workspaceName, workspacePath: workspaceKey, files });
+					}
+					fileMapSection = generateFileMapMultiRoot(multiRootMap, selectedFilesForMarking);
+				} else {
+					const workspaceRoot = workspaceFolders![0].uri.fsPath;
+					fileMapSection = generateFileMap(fileMapFiles, workspaceRoot, selectedFilesForMarking);
+				}
+
+				fileMapTokens = countTokensFromText(fileMapSection);
+			}
+		}
+
+		const totalTokens = fileTokens + fileMapTokens;
+		const t4 = Date.now();
+		console.log(`[ContextCraft] countTokens seq=${mySeq} totalTokens=${totalTokens} (files=${fileTokens}, fileMap=${fileMapTokens}) in ${t4 - t0}ms`);
+
+		// Final state with token count
+		updateStatusBar({
+			fileMapEnabled,
+			filesCount,
+			tokensText: `${totalTokens.toLocaleString()} tokens`
+		});
 	};
 
 	const debouncedRefreshAndUpdate = debounce(refreshAndUpdate, 200);
@@ -172,6 +274,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		manageCheckboxStateManually: true
 	});
 	context.subscriptions.push(treeView);
+
+	// Settings tree view
+	settingsProvider = new SettingsTreeProvider(context, debouncedRefreshAndUpdate);
+	const settingsTreeView = vscode.window.createTreeView("contextCraftSettings", {
+		treeDataProvider: settingsProvider
+	});
+	context.subscriptions.push(settingsTreeView);
+
+	// Register command for file map mode selection
+	context.subscriptions.push(
+		vscode.commands.registerCommand("contextCraft.selectFileMapMode", async () => {
+			await settingsProvider.showFileMapModeQuickPick();
+		})
+	);
 
 	const focusActiveEditorInTree = (options?: { skipIfSelected?: boolean }) => {
 		const activeEditor = vscode.window.activeTextEditor;
@@ -210,13 +326,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		95
 	);
 	tokenStatusBar.tooltip = "Tokens that will be copied by Context Craft";
-    tokenStatusBar.show();
-    tokenStatusBar.text = `$(symbol-string) 0 files | 0 tokens`;
+	tokenStatusBar.show();
+	// Initial state - will be updated by refreshAndUpdate
+	updateStatusBar({
+		fileMapEnabled: settingsProvider?.isFileMapEnabled() ?? false,
+		filesCount: 0,
+		tokensText: "0 tokens"
+	});
 	context.subscriptions.push(tokenStatusBar);
 
 	registerUnselectAllCommand(context, fileTreeProvider, debouncedRefreshAndUpdate);
 	registerSelectGitChangesCommand(context, fileTreeProvider, debouncedRefreshAndUpdate);
-	registerCopySelectedCommand(context, fileTreeProvider, resolveSelectedFiles);
+	registerCopySelectedCommand(context, fileTreeProvider, settingsProvider, resolveSelectedFiles);
 	registerRefreshCommand(context, fileTreeProvider, debouncedRefreshAndUpdate);
 	registerOpenFileCommand(context);
 	registerOpenToSideCommand(context);

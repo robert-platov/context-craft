@@ -115,3 +115,10 @@ export async function countTokens(paths: string[], signal?: AbortSignal): Promis
     console.log(`[ContextCraft] countTokens done totalTokens=${total} in ${end - start}ms`);
     return total;
 }
+
+export function countTokensFromText(text: string): number {
+    if (!text) {
+        return 0;
+    }
+    return encode(text).length;
+}
