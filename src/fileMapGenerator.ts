@@ -102,7 +102,7 @@ export function generateFileMap(files: string[], workspaceRoot: string, selected
 
 	renderTree(tree, "", true, true, lines);
 
-	return `<file_map>\n${lines.join("\n")}\n</file_map>`;
+	return `<file_map>\n${lines.join("\n")}\n\n(* denotes selected files)\n</file_map>`;
 }
 
 export function generateFileMapMultiRoot(
