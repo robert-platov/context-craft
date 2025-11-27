@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 export const STATE_KEY_FILE_MAP_MODE = "contextCraft.fileMapMode";
+export const STATE_KEY_SHOW_IGNORED_FILES = "contextCraft.showIgnoredFiles";
 
 export type FileMapMode = "disabled" | "selected" | "all";
 
@@ -19,6 +20,10 @@ const SETTINGS: SettingItem[] = [
 	{
 		id: "fileMapMode",
 		label: "File Map"
+	},
+	{
+		id: "showIgnoredFiles",
+		label: "Show Ignored Files"
 	}
 ];
 
@@ -27,13 +32,25 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingItem
 	public readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
 	private fileMapMode: FileMapMode;
+	private showIgnoredFiles: boolean;
 	private readonly context: vscode.ExtensionContext;
 	private readonly onSettingChangedCallback: () => void;
+	private onShowIgnoredFilesChangedCallback: (() => void) | undefined;
+	private onShowIgnoredFilesDisabledCallback: (() => Promise<void>) | undefined;
 
 	public constructor(context: vscode.ExtensionContext, onSettingChanged: () => void) {
 		this.context = context;
 		this.onSettingChangedCallback = onSettingChanged;
 		this.fileMapMode = context.workspaceState.get<FileMapMode>(STATE_KEY_FILE_MAP_MODE) ?? "selected";
+		this.showIgnoredFiles = context.workspaceState.get<boolean>(STATE_KEY_SHOW_IGNORED_FILES) ?? false;
+	}
+
+	public setOnShowIgnoredFilesChanged(callback: () => void): void {
+		this.onShowIgnoredFilesChangedCallback = callback;
+	}
+
+	public setOnShowIgnoredFilesDisabled(callback: () => Promise<void>): void {
+		this.onShowIgnoredFilesDisabledCallback = callback;
 	}
 
 	public getTreeItem(element: SettingItem): vscode.TreeItem {
@@ -49,6 +66,14 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingItem
 				title: "Select File Map Mode"
 			};
 			treeItem.iconPath = new vscode.ThemeIcon("list-tree");
+		} else if (element.id === "showIgnoredFiles") {
+			treeItem.description = this.showIgnoredFiles ? "On" : "Off";
+			treeItem.tooltip = "Show files ignored by .gitignore in the file tree";
+			treeItem.command = {
+				command: "contextCraft.toggleShowIgnoredFiles",
+				title: "Toggle Show Ignored Files"
+			};
+			treeItem.iconPath = new vscode.ThemeIcon(this.showIgnoredFiles ? "eye" : "eye-closed");
 		}
 
 		return treeItem;
@@ -96,6 +121,24 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingItem
 
 	public isFileMapAllFilesEnabled(): boolean {
 		return this.fileMapMode === "all";
+	}
+
+	public isShowIgnoredFilesEnabled(): boolean {
+		return this.showIgnoredFiles;
+	}
+
+	public async toggleShowIgnoredFiles(): Promise<void> {
+		const wasEnabled = this.showIgnoredFiles;
+		this.showIgnoredFiles = !this.showIgnoredFiles;
+		await this.context.workspaceState.update(STATE_KEY_SHOW_IGNORED_FILES, this.showIgnoredFiles);
+		
+		// When disabling, clean up any selected ignored files first
+		if (wasEnabled && !this.showIgnoredFiles) {
+			await this.onShowIgnoredFilesDisabledCallback?.();
+		}
+		
+		this.onDidChangeTreeDataEmitter.fire(undefined);
+		this.onShowIgnoredFilesChangedCallback?.();
 	}
 
 	public refresh(): void {

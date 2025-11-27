@@ -1,13 +1,12 @@
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
-import { MAX_PREVIEW_BYTES, MAX_COLLECTED_FILES } from "../constants";
+import { MAX_PREVIEW_BYTES } from "../constants";
 import { FileTreeProvider } from "../FileTreeProvider";
-import { generateFileMap, generateFileMapMultiRoot } from "../fileMapGenerator";
-import { getIgnoreParser } from "../getIgnoreParser";
+import { generateFileMapSection } from "../fileMapUtils";
 import { SettingsTreeProvider } from "../SettingsTreeProvider";
 import { countTokens, countTokensFromText } from "../tokenCounter";
-import { isBinary, collectFiles } from "../utils";
+import { isBinary } from "../utils";
 
 export function registerCopySelectedCommand(
   context: vscode.ExtensionContext,
@@ -55,50 +54,12 @@ export function registerCopySelectedCommand(
       // Generate file map if enabled
       let fileMapSection = "";
       if (includeFileMap) {
-        // Determine which files to show in the map
-        let fileMapFiles: string[];
-        let selectedFilesForMarking: string[] | undefined;
-
-        if (fileMapIncludeAllFiles) {
-          // Collect all files from workspace(s), respecting .gitignore
-          const allFilesPromises = workspaceFolders.map(async (ws) => {
-            const ignoreParser = await getIgnoreParser(ws.uri);
-            const capCounter = { count: 0 };
-            return collectFiles(ws.uri, ignoreParser, ws.uri, undefined, MAX_COLLECTED_FILES, capCounter);
-          });
-          const allFilesArrays = await Promise.all(allFilesPromises);
-          fileMapFiles = allFilesArrays.flat().sort();
-          // Mark only the selected files with *
-          selectedFilesForMarking = absoluteFiles;
-        } else {
-          fileMapFiles = absoluteFiles;
-          // All files are selected, so mark all
-          selectedFilesForMarking = undefined;
-        }
-
-        if (isMultiRoot) {
-          const multiRootMap = new Map<string, { workspaceName: string; workspacePath: string; files: string[] }>();
-          // Group file map files by workspace
-          const fileMapByWorkspace = new Map<string, string[]>();
-          for (const file of fileMapFiles) {
-            const fileUri = vscode.Uri.file(file);
-            const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
-            const workspaceKey = workspaceFolder?.uri.fsPath ?? workspaceFolders[0].uri.fsPath;
-            if (!fileMapByWorkspace.has(workspaceKey)) {
-              fileMapByWorkspace.set(workspaceKey, []);
-            }
-            fileMapByWorkspace.get(workspaceKey)!.push(file);
-          }
-          for (const [workspaceKey, files] of fileMapByWorkspace) {
-            const workspaceFolder = workspaceFolders.find(ws => ws.uri.fsPath === workspaceKey);
-            const workspaceName = workspaceFolder?.name ?? path.basename(workspaceKey);
-            multiRootMap.set(workspaceKey, { workspaceName, workspacePath: workspaceKey, files });
-          }
-          fileMapSection = generateFileMapMultiRoot(multiRootMap, selectedFilesForMarking);
-        } else {
-          const workspaceRoot = workspaceFolders[0].uri.fsPath;
-          fileMapSection = generateFileMap(fileMapFiles, workspaceRoot, selectedFilesForMarking);
-        }
+        const result = await generateFileMapSection({
+          workspaceFolders,
+          selectedFiles: absoluteFiles,
+          includeAllFiles: fileMapIncludeAllFiles
+        });
+        fileMapSection = result.fileMapSection;
       }
 
       let xmlChunks: string[] = ["<code_files>"];

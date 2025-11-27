@@ -74,6 +74,10 @@
         "title": "Select File Map Mode"
       },
       {
+        "command": "contextCraft.toggleShowIgnoredFiles",
+        "title": "Toggle Show Ignored Files"
+      },
+      {
         "command": "contextCraft.selectGitChanges",
         "title": "Select Git Changes",
         "icon": "$(git-commit)"

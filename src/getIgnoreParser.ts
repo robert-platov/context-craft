@@ -2,6 +2,9 @@ import ignore from "ignore";
 import * as vscode from "vscode";
 import { ignoreParserCache } from "./extension";
 
+// Patterns that are always ignored regardless of .gitignore
+export const DEFAULT_IGNORE_PATTERNS = [".git/", ".git"];
+
 export async function getIgnoreParser(workspaceRootUri: vscode.Uri): Promise<ReturnType<typeof ignore>> {
     const gitIgnoreUri = vscode.Uri.joinPath(workspaceRootUri, ".gitignore");
     try {
@@ -20,12 +23,12 @@ export async function getIgnoreParser(workspaceRootUri: vscode.Uri): Promise<Ret
 		} else {
 			gitIgnoreContent = Buffer.from(gitIgnoreBytes).toString("utf-8");
 		}
-        const parser = ignore().add(gitIgnoreContent);
+        const parser = ignore().add(DEFAULT_IGNORE_PATTERNS).add(gitIgnoreContent);
         ignoreParserCache.set(cacheKey, { parser, mtime: stat.mtime });
         console.log(`[ContextCraft] getIgnoreParser loaded .gitignore for ${cacheKey}`);
         return parser;
     } catch {
         console.log(`[ContextCraft] getIgnoreParser no .gitignore for ${workspaceRootUri.fsPath}`);
-        return ignore();
+        return ignore().add(DEFAULT_IGNORE_PATTERNS);
     }
 }

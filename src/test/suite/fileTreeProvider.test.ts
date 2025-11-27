@@ -1,12 +1,18 @@
 import * as assert from "assert";
 import proxyquire = require("proxyquire");
 import type * as vscode from "vscode";
+import ignore from "ignore";
 import { createMockUri, createVsCodeMock } from "../mocks";
 
 const proxyquireNoCallThru = proxyquire.noCallThru();
 const vscodeMock = createVsCodeMock({ workspaceFolders: ["/tmp/proj"] });
+
+// Mock getIgnoreParser to return an empty ignore parser
+const mockGetIgnoreParser = async () => ignore();
+
 const { FileTreeProvider } = proxyquireNoCallThru("../../FileTreeProvider", {
-	vscode: vscodeMock
+	vscode: vscodeMock,
+	"./getIgnoreParser": { getIgnoreParser: mockGetIgnoreParser }
 }) as typeof import("../../FileTreeProvider");
 
 suite("FileTreeProvider", () => {

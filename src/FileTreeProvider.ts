@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import { getIgnoreParser } from "./getIgnoreParser";
 
 export class FileTreeProvider implements vscode.TreeDataProvider<vscode.Uri> {
 	public readonly checkedPaths: Set<string>;
@@ -8,6 +9,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<vscode.Uri> {
 	public readonly kindCache = new Map<string, vscode.FileType>();
 	public readonly childrenCache = new Map<string, vscode.Uri[]>();
 	private readonly debouncedRefreshAndUpdate: () => void;
+	private showIgnoredFilesGetter: (() => boolean) | undefined;
 
 	public constructor(initialChecked: Set<string>, context: vscode.ExtensionContext, debouncedRefreshAndUpdate: () => void) {
 		this.checkedPaths = initialChecked;
@@ -43,7 +45,17 @@ export class FileTreeProvider implements vscode.TreeDataProvider<vscode.Uri> {
 		context.subscriptions.push(watcher);
 	}
 
+	public setShowIgnoredFilesGetter(getter: () => boolean): void {
+		this.showIgnoredFilesGetter = getter;
+	}
+
+	private shouldShowIgnoredFiles(): boolean {
+		return this.showIgnoredFilesGetter?.() ?? false;
+	}
+
 	public async getChildren(element?: vscode.Uri): Promise<vscode.Uri[]> {
+		const showIgnored = this.shouldShowIgnoredFiles();
+
 		if (!element) {
 			const roots = vscode.workspace.workspaceFolders ?? [];
 			// For multi-root workspaces, show workspace folders as top-level items
@@ -57,10 +69,13 @@ export class FileTreeProvider implements vscode.TreeDataProvider<vscode.Uri> {
 			// For single-root, show the contents directly
 			const childUris: vscode.Uri[] = [];
 			for (const ws of roots) {
+				const ignoreParser = await getIgnoreParser(ws.uri);
 				const entries = await vscode.workspace.fs.readDirectory(ws.uri);
 				for (const [name, type] of entries) {
 					const candidate = vscode.Uri.joinPath(ws.uri, name);
-					if (!this.isIgnored(candidate)) {
+					const isDir = type === vscode.FileType.Directory;
+					const relativePath = isDir ? `${name}/` : name;
+					if (showIgnored || !ignoreParser.ignores(relativePath)) {
 						this.kindCache.set(candidate.fsPath, type);
 						childUris.push(candidate);
 					}
@@ -74,11 +89,20 @@ export class FileTreeProvider implements vscode.TreeDataProvider<vscode.Uri> {
 			return cachedChildren;
 		}
 
+		const workspaceFolder = vscode.workspace.getWorkspaceFolder(element);
+		if (!workspaceFolder) {
+			return [];
+		}
+		const ignoreParser = await getIgnoreParser(workspaceFolder.uri);
+
 		const children = await vscode.workspace.fs.readDirectory(element);
 		const visible = [] as vscode.Uri[];
 		for (const [name, type] of children) {
 			const candidate = vscode.Uri.joinPath(element, name);
-			if (!this.isIgnored(candidate)) {
+			const isDir = type === vscode.FileType.Directory;
+			const relativePath = path.relative(workspaceFolder.uri.fsPath, candidate.fsPath).split(path.sep).join("/");
+			const ignoreCheckPath = isDir ? `${relativePath}/` : relativePath;
+			if (showIgnored || !ignoreParser.ignores(ignoreCheckPath)) {
 				this.kindCache.set(candidate.fsPath, type);
 				visible.push(candidate);
 			}
@@ -86,10 +110,6 @@ export class FileTreeProvider implements vscode.TreeDataProvider<vscode.Uri> {
 		const sorted = this.sortUris(visible);
 		this.childrenCache.set(cacheKey, sorted);
 		return sorted;
-	}
-
-	private isIgnored(uri: vscode.Uri): boolean {
-		return false;
 	}
 
 	private shouldIgnoreWatcherEvent(uri: vscode.Uri): boolean {
@@ -180,6 +200,11 @@ export class FileTreeProvider implements vscode.TreeDataProvider<vscode.Uri> {
 
 	public refresh(uri?: vscode.Uri): void {
 		this.onDidChangeTreeDataEmitter.fire(uri);
+	}
+
+	public clearCacheAndRefresh(): void {
+		this.childrenCache.clear();
+		this.onDidChangeTreeDataEmitter.fire(undefined);
 	}
 
 	public refreshMany(uris: vscode.Uri[]): void {

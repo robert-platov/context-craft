@@ -158,4 +158,56 @@ suite("fileMapGenerator", () => {
 		assert.ok(result.includes("a.ts *"), "selected file should have marker");
 		assert.ok(result.includes("b.ts") && !result.includes("b.ts *"), "non-selected file should not have marker");
 	});
+
+	test("generateFileMap() includes selected ignored files merged with project files", () => {
+		// Simulates the scenario where showIgnoredFiles is enabled:
+		// - allProjectFiles: regular project files (respecting .gitignore)
+		// - selectedFiles: includes both regular files AND ignored files the user selected
+		// The merged file list should include the ignored file, marked as selected
+		const projectFiles = [
+			path.join(workspaceRoot, "src", "index.ts"),
+			path.join(workspaceRoot, "src", "utils.ts")
+		];
+		const ignoredFile = path.join(workspaceRoot, "dist", "bundle.js"); // normally ignored
+		
+		// Merge project files with selected ignored file (simulates Set merge in extension.ts)
+		const mergedFiles = [...new Set([...projectFiles, ignoredFile])].sort();
+		const selectedFiles = [
+			path.join(workspaceRoot, "src", "index.ts"),
+			ignoredFile
+		];
+
+		const result = generateFileMap(mergedFiles, workspaceRoot, selectedFiles);
+
+		// The ignored file should appear in the file map with selection marker
+		assert.ok(result.includes("dist"), "should include dist directory from ignored file");
+		assert.ok(result.includes("bundle.js *"), "selected ignored file should have marker");
+		// Regular selected file should also be marked
+		assert.ok(result.includes("index.ts *"), "selected regular file should have marker");
+		// Non-selected file should not have marker
+		assert.ok(result.includes("utils.ts") && !result.includes("utils.ts *"), "non-selected file should not have marker");
+	});
+
+	test("generateFileMapMultiRoot() includes selected ignored files in multi-root workspace", () => {
+		// Same scenario but for multi-root workspaces
+		const projectFiles = ["/workspace1/src/index.ts", "/workspace1/src/utils.ts"];
+		const ignoredFile = "/workspace1/node_modules/pkg/index.js"; // normally ignored
+		
+		const mergedFiles = [...new Set([...projectFiles, ignoredFile])].sort();
+		const selectedFiles = ["/workspace1/src/index.ts", ignoredFile];
+
+		const multiRootMap = new Map([
+			["/workspace1", {
+				workspaceName: "project1",
+				workspacePath: "/workspace1",
+				files: mergedFiles
+			}]
+		]);
+
+		const result = generateFileMapMultiRoot(multiRootMap, selectedFiles);
+
+		assert.ok(result.includes("node_modules"), "should include node_modules directory from ignored file");
+		assert.ok(result.includes("index.js *"), "selected ignored file should have marker");
+		assert.ok(result.includes("src"), "should include src directory");
+	});
 });

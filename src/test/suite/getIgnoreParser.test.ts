@@ -10,7 +10,7 @@ import ignore from "ignore";
 const proxyquireNoCallThru = proxyquire.noCallThru();
 const ignoreParserCache = new Map<string, { parser: ReturnType<typeof ignore>; mtime: number }>();
 const vscodeMock = createVsCodeMock();
-const { getIgnoreParser } = proxyquireNoCallThru("../../getIgnoreParser", {
+const { getIgnoreParser, DEFAULT_IGNORE_PATTERNS } = proxyquireNoCallThru("../../getIgnoreParser", {
 	vscode: vscodeMock,
 	"./extension": { ignoreParserCache }
 }) as typeof import("../../getIgnoreParser");
@@ -56,5 +56,32 @@ suite("getIgnoreParser", () => {
 		
 		assert.notStrictEqual(parser1, parser3, "should return new parser after file change");
 		assert.ok(parser3.ignores("test.tmp"), "new parser should include updated rules");
+	});
+
+	test("DEFAULT_IGNORE_PATTERNS includes .git", () => {
+		assert.ok(DEFAULT_IGNORE_PATTERNS.includes(".git"), "should include .git");
+		assert.ok(DEFAULT_IGNORE_PATTERNS.includes(".git/"), "should include .git/");
+	});
+
+	test("always ignores .git even with .gitignore file", async function () {
+		this.timeout(3000);
+		await fs.writeFile(gitignoreFile, "*.log\n");
+		
+		const parser = await getIgnoreParser(toUri(tempRoot));
+		
+		assert.ok(parser.ignores(".git"), "should ignore .git");
+		assert.ok(parser.ignores(".git/"), "should ignore .git/");
+		assert.ok(parser.ignores(".git/config"), "should ignore files inside .git");
+	});
+
+	test("always ignores .git even without .gitignore file", async function () {
+		this.timeout(3000);
+		// No .gitignore file exists
+		
+		const parser = await getIgnoreParser(toUri(tempRoot));
+		
+		assert.ok(parser.ignores(".git"), "should ignore .git");
+		assert.ok(parser.ignores(".git/"), "should ignore .git/");
+		assert.ok(parser.ignores(".git/config"), "should ignore files inside .git");
 	});
 }); 

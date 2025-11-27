@@ -15,9 +15,9 @@ import { registerRenameFileCommand } from "./commands/renameFile";
 import { registerDeleteFileCommand } from "./commands/deleteFile";
 import { STATE_KEY_SELECTED, MAX_COLLECTED_FILES } from "./constants";
 import { debounce } from "./debounce";
-import { generateFileMap, generateFileMapMultiRoot } from "./fileMapGenerator";
 import { FileTreeProvider } from "./FileTreeProvider";
-import { getIgnoreParser } from "./getIgnoreParser";
+import { generateFileMapSection } from "./fileMapUtils";
+import { DEFAULT_IGNORE_PATTERNS, getIgnoreParser } from "./getIgnoreParser";
 import { toggleSelection } from "./selectionLogic";
 import { SettingsTreeProvider } from "./SettingsTreeProvider";
 import { countTokens, countTokensFromText } from "./tokenCounter";
@@ -58,9 +58,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			console.log(`[ContextCraft]  root=${key} selections=${group.uris.length}`);
 		}
 
+		// When showIgnoredFiles is enabled, use parser with only default patterns (always exclude .git)
+		const includeIgnoredFiles = settingsProvider?.isShowIgnoredFilesEnabled() ?? false;
+
         const nestedPerRoot: string[][] = await Promise.all(
             Array.from(byRoot.values()).map(async (group) => {
-                const ignoreParser = await getIgnoreParser(group.root);
+                const ignoreParser = includeIgnoredFiles
+					? ignore().add(DEFAULT_IGNORE_PATTERNS)
+					: await getIgnoreParser(group.root);
                 const capCounter = { count: 0 };
                 const nestedArrays = await Promise.all(
                     group.uris.map(async (uri) => {
@@ -185,52 +190,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		// - File map is enabled AND there are selected files, OR
 		// - File map mode is "all" (show full project tree even with no selections)
 		if (fileMapEnabled && (resolvedFiles.length > 0 || includeAllFiles)) {
-			const isMultiRoot = workspaceFolders!.length > 1;
+			const { fileMapSection } = await generateFileMapSection({
+				workspaceFolders: workspaceFolders!,
+				selectedFiles: resolvedFiles,
+				includeAllFiles,
+				signal: currentAbort?.signal
+			});
+			if (mySeq !== refreshSeq) { return; }
 
-			let fileMapFiles: string[];
-			let selectedFilesForMarking: string[] | undefined;
-
-			if (includeAllFiles) {
-				// Collect all files from workspace(s), respecting .gitignore
-				const allFilesPromises = workspaceFolders!.map(async (ws) => {
-					const ignoreParser = await getIgnoreParser(ws.uri);
-					const capCounter = { count: 0 };
-					return collectFiles(ws.uri, ignoreParser, ws.uri, currentAbort?.signal, MAX_COLLECTED_FILES, capCounter);
-				});
-				const allFilesArrays = await Promise.all(allFilesPromises);
-				if (mySeq !== refreshSeq) { return; }
-				fileMapFiles = allFilesArrays.flat().sort();
-				selectedFilesForMarking = resolvedFiles;
-			} else {
-				fileMapFiles = resolvedFiles;
-				selectedFilesForMarking = undefined;
-			}
-
-			if (fileMapFiles.length > 0) {
-				let fileMapSection = "";
-				if (isMultiRoot) {
-					const multiRootMap = new Map<string, { workspaceName: string; workspacePath: string; files: string[] }>();
-					const fileMapByWorkspace = new Map<string, string[]>();
-					for (const file of fileMapFiles) {
-						const fileUri = vscode.Uri.file(file);
-						const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
-						const workspaceKey = workspaceFolder?.uri.fsPath ?? workspaceFolders![0].uri.fsPath;
-						if (!fileMapByWorkspace.has(workspaceKey)) {
-							fileMapByWorkspace.set(workspaceKey, []);
-						}
-						fileMapByWorkspace.get(workspaceKey)!.push(file);
-					}
-					for (const [workspaceKey, files] of fileMapByWorkspace) {
-						const workspaceFolder = workspaceFolders!.find(ws => ws.uri.fsPath === workspaceKey);
-						const workspaceName = workspaceFolder?.name ?? path.basename(workspaceKey);
-						multiRootMap.set(workspaceKey, { workspaceName, workspacePath: workspaceKey, files });
-					}
-					fileMapSection = generateFileMapMultiRoot(multiRootMap, selectedFilesForMarking);
-				} else {
-					const workspaceRoot = workspaceFolders![0].uri.fsPath;
-					fileMapSection = generateFileMap(fileMapFiles, workspaceRoot, selectedFilesForMarking);
-				}
-
+			if (fileMapSection) {
 				fileMapTokens = countTokensFromText(fileMapSection);
 			}
 		}
@@ -282,10 +250,63 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	});
 	context.subscriptions.push(settingsTreeView);
 
+	// Wire up show ignored files setting
+	fileTreeProvider.setShowIgnoredFilesGetter(() => settingsProvider.isShowIgnoredFilesEnabled());
+	settingsProvider.setOnShowIgnoredFilesChanged(() => {
+		fileTreeProvider.clearCacheAndRefresh();
+	});
+	
+	// When show ignored files is disabled, remove any selected ignored paths
+	settingsProvider.setOnShowIgnoredFilesDisabled(async () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+		if (workspaceFolders.length === 0) { return; }
+		
+		// Group checked paths by workspace
+		const pathsToRemove: string[] = [];
+		for (const checkedPath of fileTreeProvider.checkedPaths) {
+			const uri = vscode.Uri.file(checkedPath);
+			const ws = vscode.workspace.getWorkspaceFolder(uri);
+			if (!ws) { continue; }
+			
+			const ignoreParser = await getIgnoreParser(ws.uri);
+			const relativePath = path.relative(ws.uri.fsPath, checkedPath).split(path.sep).join("/");
+			
+			// Check if this path is ignored (try both file and directory patterns)
+			const isIgnored = relativePath !== "" && (
+				ignoreParser.ignores(relativePath) || 
+				ignoreParser.ignores(`${relativePath}/`)
+			);
+			
+			if (isIgnored) {
+				pathsToRemove.push(checkedPath);
+			}
+		}
+		
+		// Remove ignored paths from selection
+		if (pathsToRemove.length > 0) {
+			for (const pathToRemove of pathsToRemove) {
+				fileTreeProvider.checkedPaths.delete(pathToRemove);
+			}
+			// Persist updated selection
+			await context.workspaceState.update(
+				STATE_KEY_SELECTED,
+				Array.from(fileTreeProvider.checkedPaths)
+			);
+			console.log(`[ContextCraft] Removed ${pathsToRemove.length} ignored paths from selection`);
+		}
+	});
+
 	// Register command for file map mode selection
 	context.subscriptions.push(
 		vscode.commands.registerCommand("contextCraft.selectFileMapMode", async () => {
 			await settingsProvider.showFileMapModeQuickPick();
+		})
+	);
+
+	// Register command for toggling show ignored files
+	context.subscriptions.push(
+		vscode.commands.registerCommand("contextCraft.toggleShowIgnoredFiles", async () => {
+			await settingsProvider.toggleShowIgnoredFiles();
 		})
 	);
 
