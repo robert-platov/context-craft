@@ -102,6 +102,20 @@ function evictOldestBinaryCacheEntries() {
 	}
 }
 
+/**
+ * Formats a token count in a compact way: "500" for small numbers, "~10k" or "~14.65k" for larger.
+ */
+export function formatTokenCount(tokens: number): string {
+	if (tokens < 1000) {
+		return `${tokens} tokens`;
+	}
+	const k = tokens / 1000;
+	// Round to 2 decimal places, then remove trailing zeros
+	const rounded = Math.round(k * 100) / 100;
+	const formatted = rounded % 1 === 0 ? String(rounded) : rounded.toFixed(2).replace(/\.?0+$/, "");
+	return `~${formatted}k tokens`;
+}
+
 export async function isBinary(absPath: string): Promise<boolean> {
 	let stats: vscode.FileStat | undefined;
 	

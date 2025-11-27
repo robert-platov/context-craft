@@ -6,7 +6,7 @@ import { FileTreeProvider } from "../FileTreeProvider";
 import { generateFileMapSection } from "../fileMapUtils";
 import { SettingsTreeProvider } from "../SettingsTreeProvider";
 import { countTokens, countTokensFromText } from "../tokenCounter";
-import { isBinary } from "../utils";
+import { formatTokenCount, isBinary } from "../utils";
 
 export function registerCopySelectedCommand(
   context: vscode.ExtensionContext,
@@ -144,7 +144,7 @@ export function registerCopySelectedCommand(
         `Copied ${absoluteFiles.length} file${
           absoluteFiles.length === 1 ? "" : "s"
         } ` +
-          `(${totalTokenCount.toLocaleString()} tokens) as XML. Paste anywhere to share or prompt an LLM.`
+          `(${formatTokenCount(totalTokenCount)}) as XML. Paste anywhere to share or prompt an LLM.`
       );
     })
   );

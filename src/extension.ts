@@ -21,7 +21,7 @@ import { DEFAULT_IGNORE_PATTERNS, getIgnoreParser } from "./getIgnoreParser";
 import { toggleSelection } from "./selectionLogic";
 import { SettingsTreeProvider } from "./SettingsTreeProvider";
 import { countTokens, countTokensFromText } from "./tokenCounter";
-import { collectFiles } from "./utils";
+import { collectFiles, formatTokenCount } from "./utils";
 		
 export let ignoreParserCache: Map<string, { parser: ReturnType<typeof ignore>, mtime: number }> = new Map();
 
@@ -211,7 +211,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		updateStatusBar({
 			fileMapEnabled,
 			filesCount,
-			tokensText: `${totalTokens.toLocaleString()} tokens`
+			tokensText: formatTokenCount(totalTokens)
 		});
 	};
 
@@ -352,7 +352,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	updateStatusBar({
 		fileMapEnabled: settingsProvider?.isFileMapEnabled() ?? false,
 		filesCount: 0,
-		tokensText: "0 tokens"
+		tokensText: formatTokenCount(0)
 	});
 	context.subscriptions.push(tokenStatusBar);
 
